@@ -1,0 +1,65 @@
+name: Bigg Boom Scraper
+
+on:
+  workflow_dispatch:
+    inputs:
+      skip_scrape:
+        description: 'Skip scraping, just do embeddings'
+        required: false
+        default: 'false'
+        type: boolean
+      skip_embed:
+        description: 'Skip embeddings, just do scrape'
+        required: false
+        default: 'false'
+        type: boolean
+  schedule:
+    - cron: '0 0 * * 6'  # Every Saturday at midnight
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      
+      - name: Install dependencies
+        run: |
+          pip install -q httpx beautifulsoup4 lxml python-dotenv
+          pip install -q transformers torch pillow tqdm supabase
+          pip install -q protobuf
+   
+      - name: Configure Supabase
+        run: |
+          echo "SUPABASE_URL=${{ secrets.SUPABASE_URL }}" >> $GITHUB_ENV
+          echo "SUPABASE_KEY=${{ secrets.SUPABASE_KEY }}" >> $GITHUB_ENV
+      
+      - name: Run scraper
+        run: |
+          if [ "${{ github.event.inputs.skip_scrape }}" == "true" ]; then
+            python3 run.py --skip-scrape
+          elif [ "${{ github.event.inputs.skip_embed }}" == "true" ]; then
+            python3 run.py --skip-embed
+          else
+            python3 run.py
+          fi
+      
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scrape-output
+          path: output/
+          retention-days: 7
+      
+      - name: Post result
+        if: always()
+        run: |
+          echo "Scraper run complete at $(date)"
