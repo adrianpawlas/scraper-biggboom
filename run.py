@@ -505,7 +505,7 @@ def run_embeddings(products_path="output/products.json", output_dir="output", dr
             "metadata": product.get("metadata"),
             "size": product.get("size"),
             "second_hand": False,
-            "country": "IN",
+            "country": None,
             "additional_images": additional_images,
             "price": product.get("price"),
             "sale": product.get("sale"),
