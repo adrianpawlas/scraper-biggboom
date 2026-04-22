@@ -33,8 +33,8 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -q httpx beautifulsoup4 lxml python-dotenv
-          pip install -q transformers torch pillow tqdm supabase
-          pip install -q protobuf
+          pip install -q transformers torch pillow sentencepiece
+          pip install -q protobuf tqdm supabase
    
       - name: Configure Supabase
         run: |
