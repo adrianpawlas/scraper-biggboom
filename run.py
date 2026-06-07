@@ -226,7 +226,7 @@ def run_scraper(output_dir="output"):
 
     logger.info("Starting scraper...")
 
-    httpx_client = httpx.Client(timeout=httpx.Timeout(connect=30.0, read=120.0), follow_redirects=True)
+    httpx_client = httpx.Client(timeout=120.0, follow_redirects=True)
     client = httpx_client
     all_urls = set()
 
