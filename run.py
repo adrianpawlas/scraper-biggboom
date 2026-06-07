@@ -217,7 +217,7 @@ def run_scraper(output_dir="output"):
                 return r
             except (httpx.ConnectError, httpx.TimeoutException, httpx.RemoteProtocolError) as e:
                 if attempt < max_retries - 1:
-                    wait = 2 ** attempt
+                    wait = 5 * (2 ** attempt)
                     logger.warning(f"  Connection error ({url[:50]}... attempt {attempt+1}/{max_retries}), retrying in {wait}s: {e}")
                     time.sleep(wait)
                 else:
@@ -226,7 +226,7 @@ def run_scraper(output_dir="output"):
 
     logger.info("Starting scraper...")
 
-    httpx_client = httpx.Client(timeout=60.0, follow_redirects=True)
+    httpx_client = httpx.Client(timeout=httpx.Timeout(connect_timeout=30.0, read_timeout=120.0), follow_redirects=True)
     client = httpx_client
     all_urls = set()
 
