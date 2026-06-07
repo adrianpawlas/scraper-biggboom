@@ -13,7 +13,9 @@ import json
 import time
 import argparse
 import logging
+import socket
 import threading
+from contextlib import contextmanager
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional, Any
 
@@ -166,6 +168,27 @@ class SupabaseClient:
                 return 0
 
 
+@contextmanager
+def force_ipv4():
+    """Temporarily force socket connections to use IPv4 only.
+
+    Some hosts (like biggboom.co) have both A and AAAA records, but
+    GitHub Actions runners may lack IPv6 routing to them, causing
+    '[Errno 101] Network is unreachable'. This context manager
+    resolves all hostnames to IPv4 addresses only.
+    """
+    original_getaddrinfo = socket.getaddrinfo
+
+    def ipv4_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+        return original_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+
+    socket.getaddrinfo = ipv4_getaddrinfo
+    try:
+        yield
+    finally:
+        socket.getaddrinfo = original_getaddrinfo
+
+
 def run_scraper(output_dir="output"):
     """Run the scraper to collect all products"""
     import httpx
@@ -202,29 +225,14 @@ def run_scraper(output_dir="output"):
                     raise
 
     logger.info("Starting scraper...")
-    client = httpx.Client(timeout=60.0, follow_redirects=True)
+
+    httpx_client = httpx.Client(timeout=60.0, follow_redirects=True)
+    client = httpx_client
     all_urls = set()
 
-    for page in range(1, 10):
-        url = f"{SHOP_URL}page/{page}/" if page > 1 else SHOP_URL
-        r = retry_request(url)
-        if r.status_code != 200:
-            break
-        soup = BeautifulSoup(r.text, "lxml")
-        products = soup.select("li.product a")
-        if not products:
-            break
-        for p in products:
-            href = p.get("href")
-            if href and "/shop/" in href:
-                all_urls.add(href)
-        logger.info(f"  Page {page}: {len(products)} products")
-        time.sleep(0.5)
-
-    for cat_url in CATEGORIES:
-        cat_name = cat_url.split("/")[-2]
+    with force_ipv4():
         for page in range(1, 10):
-            url = f"{cat_url}page/{page}/" if page > 1 else cat_url
+            url = f"{SHOP_URL}page/{page}/" if page > 1 else SHOP_URL
             r = retry_request(url)
             if r.status_code != 200:
                 break
@@ -236,99 +244,117 @@ def run_scraper(output_dir="output"):
                 href = p.get("href")
                 if href and "/shop/" in href:
                     all_urls.add(href)
+            logger.info(f"  Page {page}: {len(products)} products")
+            time.sleep(0.5)
+
+        for cat_url in CATEGORIES:
+            cat_name = cat_url.split("/")[-2]
+            for page in range(1, 10):
+                url = f"{cat_url}page/{page}/" if page > 1 else cat_url
+                r = retry_request(url)
+                if r.status_code != 200:
+                    break
+                soup = BeautifulSoup(r.text, "lxml")
+                products = soup.select("li.product a")
+                if not products:
+                    break
+                for p in products:
+                    href = p.get("href")
+                    if href and "/shop/" in href:
+                        all_urls.add(href)
+                time.sleep(0.3)
+            logger.info(f"  {cat_name}: total URLs: {len(all_urls)}")
+
+        urls = list(all_urls)
+        logger.info(f"Total unique product URLs: {len(urls)}")
+
+        os.makedirs(output_dir, exist_ok=True)
+        with open(f"{output_dir}/product_urls.txt", "w") as f:
+            for url in urls:
+                f.write(url + "\n")
+
+        results = []
+        for i, url in enumerate(urls):
+            logger.info(f"Parsing {i+1}/{len(urls)}: {url[:60]}...")
+            try:
+                r = retry_request(url)
+                if r.status_code != 200:
+                    continue
+
+                soup = BeautifulSoup(r.text, "lxml")
+
+                title = soup.select_one("h1.product_title")
+                title = title.get_text(strip=True) if title else None
+
+                price_container = soup.select_one("p.price")
+                original_price = None
+                sale_price = None
+
+                if price_container:
+                    del_el = price_container.select_one("del")
+                    if del_el:
+                        original_price = del_el.get_text(strip=True)
+                        original_price = extract_price(original_price)
+
+                    ins_el = price_container.select_one("ins")
+                    if ins_el:
+                        sale_price = ins_el.get_text(strip=True)
+                        sale_price = extract_price(sale_price)
+                    else:
+                        sale_price = original_price
+
+                main_image = soup.select_one("div.images img")
+                image_url = main_image.get("src") if main_image else None
+
+                additional_images = []
+                gallery = soup.select("div.thumbnails a")
+                for img_link in gallery:
+                    img_src = img_link.get("href") or img_link.select_one("img", {}).get("src")
+                    if img_src and img_src != image_url:
+                        additional_images.append(img_src)
+
+                category = soup.select_one("span.single-product-category a")
+                category_text = category.get_text(strip=True) if category else None
+
+                description = soup.select_one("div.woocommerce-product-details__short-description")
+                description = description.get_text(strip=True) if description else None
+
+                sizes = []
+                size_options = soup.select("select#pa_size option")
+                for size_opt in size_options[1:]:
+                    sizes.append(size_opt.get_text(strip=True))
+
+                meta = {
+                    "title": title,
+                    "description": description,
+                    "sizes": sizes,
+                    "original_price_usd": original_price,
+                    "sale_price_usd": sale_price,
+                }
+
+                price_str = original_price if original_price else ""
+
+                product = {
+                    "product_url": url,
+                    "title": title,
+                    "image_url": image_url,
+                    "additional_images": ", ".join(additional_images) if additional_images else None,
+                    "category": category_text,
+                    "description": description,
+                    "size": ", ".join(sizes) if sizes else None,
+                    "gender": None,
+                    "metadata": json.dumps(meta),
+                    "price": price_str,
+                    "sale": sale_price if sale_price != original_price else None,
+                    "source": "scraper-biggboom",
+                    "brand": "Bigg Boom",
+                    "second_hand": False,
+                }
+                results.append(product)
+
+            except Exception as e:
+                logger.error(f"Error parsing {url}: {e}")
             time.sleep(0.3)
-        logger.info(f"  {cat_name}: total URLs: {len(all_urls)}")
-
-    urls = list(all_urls)
-    logger.info(f"Total unique product URLs: {len(urls)}")
-
-    os.makedirs(output_dir, exist_ok=True)
-    with open(f"{output_dir}/product_urls.txt", "w") as f:
-        for url in urls:
-            f.write(url + "\n")
-
-    results = []
-    for i, url in enumerate(urls):
-        logger.info(f"Parsing {i+1}/{len(urls)}: {url[:60]}...")
-        try:
-            r = retry_request(url)
-            if r.status_code != 200:
-                continue
-
-            soup = BeautifulSoup(r.text, "lxml")
-
-            title = soup.select_one("h1.product_title")
-            title = title.get_text(strip=True) if title else None
-
-            price_container = soup.select_one("p.price")
-            original_price = None
-            sale_price = None
-
-            if price_container:
-                del_el = price_container.select_one("del")
-                if del_el:
-                    original_price = del_el.get_text(strip=True)
-                    original_price = extract_price(original_price)
-
-                ins_el = price_container.select_one("ins")
-                if ins_el:
-                    sale_price = ins_el.get_text(strip=True)
-                    sale_price = extract_price(sale_price)
-                else:
-                    sale_price = original_price
-
-            main_image = soup.select_one("div.images img")
-            image_url = main_image.get("src") if main_image else None
-
-            additional_images = []
-            gallery = soup.select("div.thumbnails a")
-            for img_link in gallery:
-                img_src = img_link.get("href") or img_link.select_one("img", {}).get("src")
-                if img_src and img_src != image_url:
-                    additional_images.append(img_src)
-
-            category = soup.select_one("span.single-product-category a")
-            category_text = category.get_text(strip=True) if category else None
-
-            description = soup.select_one("div.woocommerce-product-details__short-description")
-            description = description.get_text(strip=True) if description else None
-
-            sizes = []
-            size_options = soup.select("select#pa_size option")
-            for size_opt in size_options[1:]:
-                sizes.append(size_opt.get_text(strip=True))
-
-            meta = {
-                "title": title,
-                "description": description,
-                "sizes": sizes,
-                "original_price_usd": original_price,
-                "sale_price_usd": sale_price,
-            }
-
-            price_str = original_price if original_price else ""
-
-            product = {
-                "product_url": url,
-                "title": title,
-                "image_url": image_url,
-                "additional_images": ", ".join(additional_images) if additional_images else None,
-                "category": category_text,
-                "description": description,
-                "size": ", ".join(sizes) if sizes else None,
-                "gender": None,
-                "metadata": json.dumps(meta),
-                "price": price_str,
-                "sale": sale_price if sale_price != original_price else None,
-                "source": "scraper-biggboom",
-                "brand": "Bigg Boom",
-                "second_hand": False,
-            }
-            results.append(product)
-
-        except Exception as e:
-            logger.error(f"Error parsing {url}: {e}")
-        time.sleep(0.3)
 
     client.close()
 
