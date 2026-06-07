@@ -186,13 +186,28 @@ def run_scraper(output_dir="output"):
         "https://biggboom.co/product-category/long-sleeve-t-shirts/",
     ]
 
+    def retry_request(url, max_retries=MAX_RETRIES):
+        """Make an HTTP GET request with exponential backoff retry"""
+        for attempt in range(max_retries):
+            try:
+                r = client.get(url, headers=HEADERS)
+                return r
+            except (httpx.ConnectError, httpx.TimeoutException, httpx.RemoteProtocolError) as e:
+                if attempt < max_retries - 1:
+                    wait = 2 ** attempt
+                    logger.warning(f"  Connection error ({url[:50]}... attempt {attempt+1}/{max_retries}), retrying in {wait}s: {e}")
+                    time.sleep(wait)
+                else:
+                    logger.error(f"  Connection error ({url[:50]}... all {max_retries} attempts failed): {e}")
+                    raise
+
     logger.info("Starting scraper...")
     client = httpx.Client(timeout=60.0, follow_redirects=True)
     all_urls = set()
 
     for page in range(1, 10):
         url = f"{SHOP_URL}page/{page}/" if page > 1 else SHOP_URL
-        r = client.get(url, headers=HEADERS)
+        r = retry_request(url)
         if r.status_code != 200:
             break
         soup = BeautifulSoup(r.text, "lxml")
@@ -210,7 +225,7 @@ def run_scraper(output_dir="output"):
         cat_name = cat_url.split("/")[-2]
         for page in range(1, 10):
             url = f"{cat_url}page/{page}/" if page > 1 else cat_url
-            r = client.get(url, headers=HEADERS)
+            r = retry_request(url)
             if r.status_code != 200:
                 break
             soup = BeautifulSoup(r.text, "lxml")
@@ -236,7 +251,7 @@ def run_scraper(output_dir="output"):
     for i, url in enumerate(urls):
         logger.info(f"Parsing {i+1}/{len(urls)}: {url[:60]}...")
         try:
-            r = client.get(url, headers=HEADERS)
+            r = retry_request(url)
             if r.status_code != 200:
                 continue
 
